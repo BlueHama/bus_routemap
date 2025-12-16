@@ -1,10 +1,11 @@
 import re, math, html
 from PIL import ImageFont
 from matplotlib import font_manager
+import os
 
 origin_tile = (3490, 1584)
 
-rx_pass_stop = re.compile('\((경유|가상)\)$')
+rx_pass_stop = re.compile(r'\((경유 ?|가상|미정차)\)$')
 rx_centerstop = re.compile('\(중\)$')
 
 svg_depot_icon = '<g id="bus_depot" transform="translate(18, 18) scale(2.8, 2.8) rotate({0:.2f})"><circle style="fill:{1};fill-opacity:1;stroke:nonel" cx="0" cy="0" r="5.8" /> <path style="fill:#ffffff;fill-opacity:1;stroke:none" d="m 0,0 c -0.19263,0 -0.3856,0.073 -0.5332,0.2207 -0.2952,0.2952 -0.2952,0.7712 0,1.0664 l 1.00976,1.0097 h -4.10742 c -0.41747,0 -0.75195,0.3365 -0.75195,0.7539 0,0.4175 0.33448,0.7539 0.75195,0.7539 h 4.11719 l -1.05469,1.0547 c -0.2952,0.2952 -0.2952,0.7712 0,1.0664 0.2952,0.2952 0.77121,0.2952 1.06641,0 l 2.25586,-2.2539 c 0.0305,-0.022 0.0603,-0.049 0.0879,-0.076 0.16605,-0.1661 0.23755,-0.3876 0.21679,-0.6036 -6.2e-4,-0.01 -10e-4,-0.013 -0.002,-0.019 -0.002,-0.018 -0.005,-0.035 -0.008,-0.053 -3.9e-4,0 -0.002,0 -0.002,-0.01 -0.0347,-0.1908 -0.14003,-0.3555 -0.28907,-0.4668 l -2.22461,-2.2265 c -0.1476,-0.1476 -0.34057,-0.2207 -0.5332,-0.2207 z" transform="translate(0.6,-3)" /></g>'
@@ -153,9 +154,13 @@ def get_point_segment(points, start, end, dist):
     return idx_prev, idx_next
 
 def find_font_file(font_style):
-    fp = font_manager.FontProperties(**font_style)  
-    font_path = font_manager.findfont(fp, fallback_to_default=False)
-
+    try:
+        fp = font_manager.FontProperties(**font_style)
+        font_path = font_manager.findfont(fp, fallback_to_default=False)
+    except ValueError:
+        # DIN 폰트 없을 때 Arial로 대체
+        fp = font_manager.FontProperties(family='Arial')
+        font_path = font_manager.findfont(fp, fallback_to_default=True)
     return font_path
     
 def get_text_width(text, font_style):
@@ -179,7 +184,6 @@ def get_text_width(text, font_style):
             result += 1
     
     return result
-
 
 def check_collision(r1, r2):
     if r1[0] < r2[0] + r2[2] and r1[0] + r1[2] > r2[0] and r1[1] < r2[1] + r2[3] and r1[1] + r1[3] > r2[1]:
@@ -253,6 +257,13 @@ def get_bus_stop_name(bus_stop):
     return name, False
 
 def get_bus_color(route_info):
+    # 사용자 정의 색상이 있으면 우선 사용
+    if 'custom_color' in route_info and route_info['custom_color']:
+        line_color = route_info['custom_color']
+        # 어두운 색상 자동 생성 (RGB 값을 0.7배)
+        line_dark_color = darken_color(line_color)
+        return (line_color, line_dark_color)
+    
     if route_info['type'] == 1 or route_info['type'] == 51:
         # 공항리무진
         line_color = '#aa9872'
@@ -307,11 +318,18 @@ def get_bus_color(route_info):
         line_color = '#6EBF46'
         line_dark_color = '#559734'
     else:
-        # 서울 간선
+        # 서울 간선 (기본값)
         line_color = '#3d5bab'
         line_dark_color = '#263c77'
     
     return (line_color, line_dark_color)
+
+def darken_color(hex_color):
+    """색상 코드를 어둡게 만듦 (RGB 값을 0.7배)"""
+    hex_color = hex_color.lstrip('#')
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    r, g, b = int(r * 0.7), int(g * 0.7), int(b * 0.7)
+    return f'#{r:02x}{g:02x}{b:02x}'
 
 class RouteMap():
     def __init__(self, route_info, bus_stops, points, is_one_way = False, theme = 'light'):
@@ -334,9 +352,18 @@ class RouteMap():
         return None
     
     def update_trans_id(self, new_id):
-        if new_id >= len(self.bus_stops) or new_id < 0:
-            raise ValueError()
-        
+        # None 체크 및 기본값 설정
+        if new_id is None:
+            # 회차 지점을 찾을 수 없으면 중간 지점 사용
+            new_id = max(0, len(self.bus_stops) // 2 - 1)
+            print(f"Warning: trans_id not found, using default: {new_id}")
+    
+    # 범위 검증
+        if new_id < 0:
+            new_id = 0
+        elif new_id >= len(self.bus_stops):
+            new_id = len(self.bus_stops) - 1
+    
         self.trans_id = new_id
         self.t_point = find_nearest_point(convert_pos(self.bus_stops[self.trans_id]['pos']), self.points)
 
@@ -431,9 +458,14 @@ class RouteMap():
                     bus_name_main_svg += '<text y="82" x="{}" style="font-weight:normal;font-size:85.3333px;font-family:\'Din Medium\';text-align:start;fill:#ffffff">{}</text>'.format(bus_name_main_x + 20, escape_svg_text(bus_name_main_split[i]))
                 bus_name_main_x += get_text_width(bus_name_main_split[i], {'family': 'Din Medium'}) * 85.3333
 
-        bus_name_svg = bus_name_main_svg + '<text y="82" x="{}" style="font-weight:normal;font-size:72px;font-family:\'Din Medium\';text-align:start;fill:#ffffff">{}</text>'.format(bus_name_main_x + 20, escape_svg_text(bus_name_suffix))
-        bus_name_main_x += get_text_width(bus_name_suffix, {'family': 'Din Medium'}) * 72
-
+# suffix도 한글이면 나눔스퀘어 폰트 사용
+        if re.match(r'[가-힣()]', bus_name_suffix):
+            bus_name_svg = bus_name_main_svg + '<text y="75" x="{}" style="font-weight:bold;font-size:72px;font-family:\'NanumSquare\';text-align:start;fill:#ffffff">{}</text>'.format(bus_name_main_x + 20, escape_svg_text(bus_name_suffix))
+            bus_name_main_x += get_text_width(bus_name_suffix, {'family': 'NanumSquare', 'weight': 'bold'}) * 72
+        else:
+            bus_name_svg = bus_name_main_svg + '<text y="82" x="{}" style="font-weight:normal;font-size:72px;font-family:\'Din Medium\';text-align:start;fill:#ffffff">{}</text>'.format(bus_name_main_x + 20, escape_svg_text(bus_name_suffix))
+            bus_name_main_x += get_text_width(bus_name_suffix, {'family': 'Din Medium'}) * 72
+        
         bus_name_width = bus_name_main_x + 40
         bus_startend_width = (get_text_width(self.route_info['start'], {'family': 'NanumSquare'}) + get_text_width(self.route_info['end'], {'family': 'NanumSquare'})) * 64 + 135
 
@@ -479,7 +511,7 @@ class RouteMap():
     def draw_bus_stop_text(self, stop, size_factor, direction = -1):
         style_fill_white = "fill:#ffffff;"
         style_fill_gray = "fill:#cccccc;"
-        style_text = "font-size:30px;line-height:1.0;font-family:'KoPubDotum Bold';text-align:start;letter-spacing:0px;word-spacing:0px;fill-opacity:1;"
+        style_text = "font-weight:bold;font-size:30px;line-height:1.0;font-family:'KoPubDotum';text-align:start;letter-spacing:0px;word-spacing:0px;fill-opacity:1;"
         
         section = 0 if stop['section'] == 0 or self.is_one_way else 1
         
