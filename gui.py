@@ -6,7 +6,7 @@ from PySide6.QtCore import QByteArray, Qt, QBasicTimer, QObject, QEventLoop, Sig
 from PySide6.QtGui import QIcon, QTextDocument, QTextOption, QIntValidator
 import bus_api, routemap, mapbox
 
-version = '1.2.1'
+version = '1.3'
 
 def resource_path(relative_path):
     base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -52,35 +52,57 @@ class BusRouteThread(QObject):
     
     def __init__(self, parent):
         super(BusRouteThread, self).__init__(parent)
-        
         self.widget = parent
+        self.route_data = None  # ← 추가
         
-    def run(self, route_data):
+    def run(self):  # ← 들여쓰기 수정 (클래스 레벨)
         error = None
         route_positions = None
         route_info = None
         bus_stops = None
         
         try:
-            if route_data['type'] <= 10:
-                route_positions = bus_api.get_seoul_bus_route(self.widget.key, route_data['id'])
-                route_info = bus_api.get_seoul_bus_type(self.widget.key, route_data['id'])
-                bus_stops = bus_api.get_seoul_bus_stops(self.widget.key, route_data['id'])
-            elif route_data['type'] <= 60:
-                route_positions = bus_api.get_gyeonggi_bus_route(self.widget.key, route_data['id'])
-                route_info = bus_api.get_gyeonggi_bus_type(self.widget.key, route_data['id'])
-                bus_stops = bus_api.get_gyeonggi_bus_stops(self.widget.key, route_data['id'])
+            # [신규] TAGO API 버스인지 확인
+            if isinstance(self.route_data['id'], str) and self.route_data['id'].startswith('TAGO|'):
+                # TAGO API 형식: "TAGO|cityCode|routeId"
+                parts = self.route_data['id'].split('|')
+                if len(parts) == 3:
+                    city_code = parts[1]
+                    tago_route_id = parts[2]
+                    
+                    route_positions = bus_api.get_tago_bus_route(self.widget.key, tago_route_id, city_code)
+                    route_info = bus_api.get_tago_bus_type(self.widget.key, tago_route_id, city_code)
+                    bus_stops = bus_api.get_tago_bus_stops(self.widget.key, tago_route_id, city_code)
+                    
+                    # ← 데이터 검증 추가
+                    if not route_positions or not route_info or not bus_stops:
+                        error = "[오류] TAGO API에서 노선 데이터를 가져오는데 실패했습니다."
+                    elif not isinstance(route_info, dict):
+                        error = "[오류] 노선 정보 형식이 올바르지 않습니다."
+                else:
+                    error = "[오류] TAGO 노선 ID 형식이 올바르지 않습니다."
+            elif self.route_data['type'] <= 10:
+                route_positions = bus_api.get_seoul_bus_route(self.widget.key, self.route_data['id'])
+                route_info = bus_api.get_seoul_bus_type(self.widget.key, self.route_data['id'])
+                bus_stops = bus_api.get_seoul_bus_stops(self.widget.key, self.route_data['id'])
+            elif self.route_data['type'] <= 60:
+                route_positions = bus_api.get_gyeonggi_bus_route(self.widget.key, self.route_data['id'])
+                route_info = bus_api.get_gyeonggi_bus_type(self.widget.key, self.route_data['id'])
+                bus_stops = bus_api.get_gyeonggi_bus_stops(self.widget.key, self.route_data['id'])
             else:
-                route_positions, route_bims_id = bus_api.get_busan_bus_route(route_data['name'])
+                route_positions, route_bims_id = bus_api.get_busan_bus_route(self.route_data['name'])
                 route_info = bus_api.get_busan_bus_type(self.widget.key, route_bims_id)
-                bus_stops = bus_api.get_busan_bus_stops(self.widget.key, route_data['id'], route_bims_id)
+                bus_stops = bus_api.get_busan_bus_stops(self.widget.key, self.route_data['id'], route_bims_id)
         except requests.exceptions.ConnectTimeout:
             error = "[오류] Connection Timeout"
         except Exception as e:
             error = "[오류] " + str(e)
+            import traceback
+            traceback.print_exc()  # ← 디버깅용 (선택사항)
         
         result_json = json.dumps({'result': {'route_positions': route_positions, 'route_info': route_info, 'bus_stops': bus_stops}, 'error': error})
         self.thread_finished.emit(result_json)
+
 
 class OkDialog(QDialog):
     def __init__(self, parent, title, text):
@@ -180,23 +202,23 @@ class BusInfoEditWindow(QWidget):
         self.name_input = QLineEdit()
         self.start_input = QLineEdit()
         self.end_input = QLineEdit()
+        self.color_input = QLineEdit()
         
         self.name_input.setText(self.parent_window.route_info['name'])
         self.start_input.setText(self.parent_window.route_info['start'])
         self.end_input.setText(self.parent_window.route_info['end'])
-
-        self.route_types = ['서울 간선', '서울 지선/서울 마을', '서울 광역/경기 직행좌석', '서울 순환', '경기 좌석', '경기 일반', '경기 마을', '광역급행버스', '부산 일반', '부산 급행', '부산 심야', '부산 마을', '공항리무진/경기 프리미엄']
-        self.route_type_ids = [3, 2, 6, 5, 12, 13, 30, 14, 61, 62, 64, 65, 1]
-        self.route_type_input = RoundedComboBox()
-        self.route_type_input.addItems(self.route_types)
-
-        if self.parent_window.route_info['type'] not in self.route_type_ids:
-            self.parent_window.route_info['type'] = 3
-        self.route_type_input.setCurrentIndex(self.route_type_ids.index(self.parent_window.route_info['type']))
+        
+        # 기존 custom_color 값이 있으면 # 제외하고 표시
+        if 'custom_color' in self.parent_window.route_info and self.parent_window.route_info['custom_color']:
+            color_display = self.parent_window.route_info['custom_color']
+            if color_display.startswith('#'):
+                color_display = color_display[1:]
+            self.color_input.setText(color_display)
 
         self.name_input.returnPressed.connect(self.ok)
         self.start_input.returnPressed.connect(self.ok)
         self.end_input.returnPressed.connect(self.ok)
+        self.color_input.returnPressed.connect(self.ok)
         
         bus_info_layout.addWidget(QLabel("노선명: "), 0, 0)
         bus_info_layout.addWidget(self.name_input, 0, 1)
@@ -206,8 +228,8 @@ class BusInfoEditWindow(QWidget):
         bus_info_layout.addWidget(QLabel("종점: "), 2, 0)
         bus_info_layout.addWidget(self.end_input, 2, 1)
 
-        bus_info_layout.addWidget(QLabel("종류: "), 3, 0)
-        bus_info_layout.addWidget(self.route_type_input, 3, 1)
+        bus_info_layout.addWidget(QLabel("색상 코드: "), 3, 0)
+        bus_info_layout.addWidget(self.color_input, 3, 1)
 
         self.button_ok = QPushButton("확인")
         self.button_ok.clicked.connect(self.ok)
@@ -228,7 +250,30 @@ class BusInfoEditWindow(QWidget):
         self.parent_window.route_info['name'] = self.name_input.text()
         self.parent_window.route_info['start'] = self.start_input.text()
         self.parent_window.route_info['end'] = self.end_input.text()
-        self.parent_window.route_info['type'] = self.route_type_ids[self.route_type_input.currentIndex()]
+        
+        # 색상 코드 검증 및 저장
+        color_text = self.color_input.text().strip()
+        
+        # 비어있으면 초기에 불러온 색상으로 설정
+        if not color_text:
+            if 'custom_color' in self.parent_window.route_info:
+                color_text = self.parent_window.route_info['custom_color']
+            else:
+                # 저장된 색상이 없으면 그냥 닫기
+                self.close()
+                return
+        
+        # #이 없으면 추가
+        if not color_text.startswith('#'):
+            color_text = '#' + color_text
+        
+        # 6자리 hex 코드 검증
+        if len(color_text) == 7 and all(c in '0123456789abcdefABCDEF' for c in color_text[1:]):
+            self.parent_window.route_info['custom_color'] = color_text.lower()
+        else:
+            # 잘못된 형식이면 경고하고 저장하지 않음
+            QMessageBox.warning(self, "색상 코드 오류")
+            return
 
         self.parent_window.refresh_preview()
         self.close()
@@ -298,7 +343,7 @@ class BusStopEditWindow(QWidget):
         self.bus_stop_table.setRowCount(len(self.parent_window.bus_stops))
         
         for i, stop in enumerate(self.parent_window.bus_stops):
-            item_arsid = QTableWidgetItem(stop['arsid'])
+            item_arsid = QTableWidgetItem(stop.get('arsid'))
             item_name = QTableWidgetItem(stop['name'])
             item_displayname = QTableWidgetItem('')
             item_section = QTableWidgetItem('1' if i > trans_id else '0')
@@ -467,7 +512,21 @@ class RenderThread(QThread):
         
         if self.draw_background_map:
             try:
-                parent.svg_map = bus_api.get_mapbox_map(parent.bus_routemap.mapframe, parent.mapbox_key, mapbox_style) + parent.svg_map
+                # 줌 레벨 가져오기
+                zoom_index = parent.zoom_level_combo.currentIndex()
+                if zoom_index == 0:
+                    # 자동
+                    zoom_level = None
+                else:
+                    # 11, 12, 13, 14
+                    zoom_level = 10 + zoom_index
+                
+                parent.svg_map = bus_api.get_mapbox_map(
+                    parent.bus_routemap.mapframe, 
+                    parent.mapbox_key, 
+                    mapbox_style,
+                    zoom_level=zoom_level
+                ) + parent.svg_map
             except Exception as e:
                 self.render_error.emit(type(e).__name__ + ": " + str(e))
                 raise
@@ -486,20 +545,33 @@ class RenderWindow(QWidget):
     
     def __init__(self, parent, route_info, bus_stops, points):
         super().__init__()
-        
+    
         self.parent_widget = parent
-        
+    
+        # route_info가 리스트인 경우 처리
+        if isinstance(route_info, list):
+            if len(route_info) > 0:
+                route_info = route_info[0]
+            else:
+                route_info = {'name': '제목 없는 노선', 'type': 0, 'start': '', 'end': ''}
+    
+        # route_info가 딕셔너리가 아니거나 비어있는 경우 처리
+        if not isinstance(route_info, dict) or not route_info:
+            route_info = {'name': '제목 없는 노선', 'type': 0, 'start': '', 'end': ''}
+    
         self.route_info = route_info
         self.bus_stops = bus_stops
         self.points = points
-        
+    
         self.mapbox_key = parent.mapbox_key
         self.key = parent.key
-        
+    
         self.svg_map = None
         self.render_bus_stop_list = None
-        
-        self.setWindowTitle("{}".format(route_info['name']))
+    
+        # 안전하게 name 가져오기
+        route_name = route_info.get('name', '제목 없는 노선')
+        self.setWindowTitle("{}".format(route_name))
         
         icon = QIcon(resource_path("resources/icon.ico"))
         self.setWindowIcon(icon)
@@ -563,15 +635,30 @@ class RenderWindow(QWidget):
         
         group_etc = QGroupBox("기타")
         self.checkbox_background_map = QCheckBox("배경 지도 사용", group_etc)
-        
+
         if not self.parent_widget.mapbox_key_valid:
             self.checkbox_background_map.setEnabled(False)
             self.checkbox_background_map.setChecked(False)
         else:
             self.checkbox_background_map.setChecked(True)
         
+        # 줌 레벨 선택 추가
+        zoom_level_label = QLabel("배경 지도 줌 레벨:")
+        self.zoom_level_combo = RoundedComboBox()
+        self.zoom_level_combo.addItems(['자동', '11', '12', '13', '14'])
+        self.zoom_level_combo.setCurrentIndex(0)  # 기본값: 자동
+        self.zoom_level_combo.currentIndexChanged.connect(self.refresh_preview) 
+        # 배경 지도가 비활성화되면 줌 레벨도 비활성화
+        if not self.parent_widget.mapbox_key_valid:
+            self.zoom_level_combo.setEnabled(False)
+
+        zoom_level_layout = QHBoxLayout()
+        zoom_level_layout.addWidget(zoom_level_label)
+        zoom_level_layout.addWidget(self.zoom_level_combo)
+
         group_etc_layout = QVBoxLayout(group_etc)
         group_etc_layout.addWidget(self.checkbox_background_map)
+        group_etc_layout.addLayout(zoom_level_layout)
         
         self.execute_button = QPushButton("저장")
         
@@ -622,6 +709,7 @@ class RenderWindow(QWidget):
         self.button_oneway_no.clicked.connect(self.refresh_preview)
         
         self.checkbox_background_map.clicked.connect(self.refresh_preview)
+        self.checkbox_background_map.clicked.connect(self.toggle_zoom_level)
     
     def showEvent(self, event):
         self.refresh_preview()
@@ -633,7 +721,11 @@ class RenderWindow(QWidget):
     def bus_info_edit_window(self):
         self.info_edit_window = BusInfoEditWindow(self)
         self.info_edit_window.show()
-    
+
+    def toggle_zoom_level(self):
+        # 배경 지도가 체크되어 있을 때만 줌 레벨 선택 가능
+        self.zoom_level_combo.setEnabled(self.checkbox_background_map.isChecked())
+
     def refresh_preview(self):
         self.render_thread = RenderThread(self, self.checkbox_background_map.isChecked())
         self.render_thread.start()
@@ -856,11 +948,12 @@ class MainWindow(QMainWindow):
         self.seoul_key_valid = bus_api.check_seoul_key_valid(self.key)
         self.gyeonggi_key_valid = bus_api.check_gyeonggi_key_valid(self.key)
         self.busan_key_valid = bus_api.check_busan_key_valid(self.key)
+        self.tago_key_valid = bus_api.check_tago_key_valid(self.key)
         self.mapbox_key_valid = mapbox.check_token_valid(self.mapbox_key)
     
     def check_key_valid(self):
-        if not self.seoul_key_valid and not self.gyeonggi_key_valid and not self.busan_key_valid:
-            self.key_error_dialog = OkDialog(self, '오류', 
+        if not self.seoul_key_valid and not self.gyeonggi_key_valid and not self.busan_key_valid and not self.tago_key_valid:
+            self.key_error_dialog = OkDialog(self, '오류',
                 '<p><b>OpenAPI 키가 올바르지 않습니다.</b></p>' +
                 '<p>서울시, 경기도, 부산시 버스정보시스템 API 키를 아래 사이트에서<br/>각각 발급받아야 사용할 수 있습니다.'+
                 '<ul><li>서울시 API: <a href="https://www.data.go.kr/data/15000193/openapi.do">https://www.data.go.kr/data/15000193/openapi.do</a></li>' +
@@ -914,11 +1007,11 @@ class MainWindow(QMainWindow):
         self.result_table.setRowCount(len(self.bus_info_list))
         
         for i, bus in enumerate(self.bus_info_list):
-            item_region = QTableWidgetItem(bus_api.convert_type_to_region(bus['type']))
+            item_region = QTableWidgetItem(bus_api.convert_type_to_region(bus['type'], bus['id']))
             item_type = QTableWidgetItem(bus_api.route_type_str[bus['type']])
             item_name = QTableWidgetItem(bus['name'])
             item_desc = QTableWidgetItem(bus['desc'])
-            
+    
             self.result_table.setItem(i, 0, item_region)
             self.result_table.setItem(i, 1, item_type)
             self.result_table.setItem(i, 2, item_name)
@@ -929,10 +1022,13 @@ class MainWindow(QMainWindow):
     def draw_route_preview(self, item):
         self.result_table.setEnabled(False)
         route_data = self.bus_info_list[item.row()]
-        
+    
         self.preview_line_color, self.preview_line_dark_color = routemap.get_bus_color(route_data)
-        
-        t = threading.Thread(target=self.bus_route_thread.run, args=(route_data,))
+    
+        # route_data를 thread 객체의 속성으로 저장
+        self.bus_route_thread.route_data = route_data  # ← 추가
+    
+        t = threading.Thread(target=self.bus_route_thread.run)  # ← args 제거
         t.daemon = True
         t.start()
     

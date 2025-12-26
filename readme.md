@@ -1,11 +1,12 @@
 ## 시내버스 노선도 생성기
 
-서울시, 경기도, 부산시 시내버스 노선도를 SVG 파일 형식으로 자동으로 생성해주는 프로그램입니다.
+전국(실시간 정보제공 불가지역 제외) 시내버스 노선도를 SVG 파일 형식으로 자동으로 생성해주는 프로그램입니다.
 
-서울시, 경기도, 부산시 버스정보시스템 API 키를 아래 사이트에서 각각 발급받아야 사용할 수 있습니다.
+서울시, 경기도, 부산시 버스정보시스템 및 국토교통부(TAGO)버스노선정보 API 키를 아래 사이트에서 각각 발급받아야 사용할 수 있습니다.
  * 서울시 API: https://www.data.go.kr/data/15000193/openapi.do
  * 경기도 API: https://www.data.go.kr/data/15080662/openapi.do
  * 부산시 API: https://www.data.go.kr/data/15092750/openapi.do
+ * TAGO API: https://www.data.go.kr/data/15098529/openapi.do
 
 배경 지도를 사용하려면 Mapbox API 키를 별도로 발급받아야 합니다.
  * https://www.mapbox.com/
